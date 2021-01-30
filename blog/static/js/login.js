@@ -22,7 +22,7 @@ var vm = new Vue({
             
         },
         //检查密码
-        check_mobile:function () {
+        check_password:function () {
             
         },
         //提交
