@@ -2,6 +2,7 @@ import re
 from random import randint
 
 from django.contrib.auth import login, authenticate, logout
+from django.contrib.auth.mixins import LoginRequiredMixin
 from django.db import DatabaseError
 from django.shortcuts import render, redirect
 from django.urls import reverse
@@ -169,8 +170,15 @@ class LoginView(View):
         # 实现状态保持
         login(request, user)
 
+        # # 响应登录结果
+        # response = redirect(reverse('home:index'))
+
         # 响应登录结果
-        response = redirect(reverse('home:index'))
+        next = request.GET.get('next')
+        if next:
+            response = redirect(next)
+        else:
+            response = redirect(reverse('home:index'))
 
         # 设置状态保持的周期
         if remember != 'on':
@@ -199,4 +207,100 @@ class LogoutView(View):
         # 退出登录时清除cookie中的登录状态
         response.delete_cookie('is_login')
 
+        return response
+
+
+class ForgetPasswordView(View):
+
+    def get(self, request):
+        return render(request, 'forget_password.html')
+
+    def post(self, request):
+        # 接收参数
+        mobile = request.POST.get('mobile')
+        password = request.POST.get('password')
+        password2 = request.POST.get('password2')
+        smscode = request.POST.get('sms_code')
+
+        # 判断参数是否齐全
+        if not all([mobile, password, password2, smscode]):
+            return HttpResponseBadRequest('缺少必传参数')
+
+        # 判断手机号是否合法
+        if not re.match(r'^1[3-9]\d{9}$', mobile):
+            return HttpResponseBadRequest('请输入正确的手机号码')
+
+        # 判断密码是否是8-20个数字
+        if not re.match(r'^[0-9A-Za-z]{8,20}$', password):
+            return HttpResponseBadRequest('请输入8-20位的密码')
+
+        # 判断两次密码是否一致
+        if password != password2:
+            return HttpResponseBadRequest('两次输入的密码不一致')
+
+        # 验证短信验证码
+        redis_conn = get_redis_connection('default')
+        sms_code_server = redis_conn.get('sms:%s' % mobile)
+        if sms_code_server is None:
+            return HttpResponseBadRequest('短信验证码已过期')
+        if smscode != sms_code_server.decode():
+            return HttpResponseBadRequest('短信验证码错误')
+
+        # 根据手机号查询数据
+        try:
+            user = User.objects.get(mobile=mobile)
+        except User.DoesNotExist:
+            # 如果该手机号不存在，则注册个新用户
+            try:
+                User.objects.create_user(username=mobile, mobile=mobile, password=password)
+            except Exception:
+                return HttpResponseBadRequest('修改失败，请稍后再试')
+        else:
+            # 修改用户密码
+            user.set_password(password)
+            user.save()
+
+        # 跳转到登录页面
+        response = redirect(reverse('users:login'))
+
+        return response
+
+
+class UserCenterView(LoginRequiredMixin, View):
+
+    def get(self, request):
+        # 获取用户信息
+        user = request.user
+
+        # 组织模板渲染数据
+        context = {
+            'username': user.username,
+            'mobile': user.mobile,
+            'avatar': user.avatar.url if user.avatar else None,
+            'user_desc': user.user_desc
+        }
+        return render(request, 'center.html', context=context)
+
+    def post(self, request):
+        # 接收数据
+        user = request.user
+        avatar = request.FILES.get('avatar')
+        username = request.POST.get('username', user.username)
+        user_desc = request.POST.get('desc', user.user_desc)
+
+        # 修改数据库数据
+        try:
+            user.username = username
+            user.user_desc = user_desc
+            if avatar:
+                user.avatar = avatar
+            user.save()
+        except Exception as e:
+            logger.error(e)
+            return HttpResponseBadRequest('更新失败，请稍后再试')
+
+        # 返回响应，刷新页面
+        response = redirect(reverse('users:center'))
+        # 更新cookie信息
+        response.set_cookie('username', user.username, max_age=30 * 24 * 3600)
         return response
